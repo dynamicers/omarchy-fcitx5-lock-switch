@@ -5,12 +5,13 @@ when Omarchy requests a lock. When the session is unlocked, it reactivates the
 input method that was active before the lock. If Fcitx5 was already inactive,
 the plugin leaves it inactive after unlock.
 
-The plugin uses `omarchy-shell lock isLocked`, so it covers both manual and
-idle locks made through Omarchy. It does not change Rime's configuration or
-handle a lock started by another locker. The Omarchy lock service currently
-waits about 500 ms between the lock request and the session-lock surface; this
-plugin checks the request every 100 ms. On a heavily loaded system, switching
-before the surface appears is best effort.
+The plugin follows the Omarchy shell's `lock-requested` and `unlocked` journal
+events, so it covers both manual and idle locks made through Omarchy. It
+checks the current lock state once when it starts or reconnects. It does not
+change Rime's configuration or handle a lock started by another locker. The
+Omarchy lock service currently waits about 500 ms between the request and the
+session-lock surface. On a heavily loaded system, switching before the surface
+appears is best effort.
 
 ## Install
 
