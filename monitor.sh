@@ -5,7 +5,7 @@
 # events avoids repeatedly launching an IPC client while the desktop is idle.
 
 last_locked=false
-changed_input_method=false
+was_active=false
 previous_input_method=
 
 input_state() {
@@ -19,23 +19,26 @@ log_state() {
 lock_started() {
   [[ $last_locked == true ]] && return
   last_locked=true
-  changed_input_method=false
+  was_active=false
   previous_input_method=
 
   if [[ $(input_state) == 2 ]]; then
+    was_active=true
     previous_input_method=$(fcitx5-remote -n 2>/dev/null)
-    if fcitx5-remote -c >/dev/null 2>&1; then
-      changed_input_method=true
-    fi
   fi
   log_state "lock-requested"
 }
 
 lock_ready() {
-  [[ $last_locked == true ]] || lock_started
+  if [[ $last_locked != true ]]; then
+    # The request was missed (for example, this service started mid-lock).
+    # There is no reliable pre-lock state to restore in that case.
+    last_locked=true
+    was_active=false
+    previous_input_method=
+  fi
 
-  # The session-lock surface has its own input context. It may start active
-  # even though we inactivated the window that was focused before the lock.
+  # Switch only after the lock surface has its own input context.
   if [[ $(input_state) == 2 ]]; then
     fcitx5-remote -c >/dev/null 2>&1
   fi
@@ -44,13 +47,13 @@ lock_ready() {
 
 lock_ended() {
   [[ $last_locked == false ]] && return
-  if [[ $changed_input_method == true ]]; then
+  if [[ $was_active == true ]]; then
     fcitx5-remote -o >/dev/null 2>&1
     if [[ -n $previous_input_method ]]; then
       fcitx5-remote -s "$previous_input_method" >/dev/null 2>&1
     fi
   fi
-  changed_input_method=false
+  was_active=false
   previous_input_method=
   last_locked=false
   log_state "unlocked"
@@ -58,7 +61,7 @@ lock_ended() {
 
 check_current_lock() {
   case $(omarchy-shell -q lock isLocked 2>/dev/null) in
-    true) lock_started ;;
+    true) lock_ready ;;
     false) lock_ended ;;
   esac
 }
