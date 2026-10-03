@@ -8,12 +8,16 @@ last_locked=false
 was_active=false
 previous_input_method=
 
+remote() {
+  timeout 2s fcitx5-remote "$@" 2>/dev/null
+}
+
 input_state() {
-  fcitx5-remote 2>/dev/null || true
+  remote || true
 }
 
 log_state() {
-  logger -t rime-lock-ascii -- "$1 fcitx_state=$(input_state)" 2>/dev/null || true
+  logger -t omarchy-fcitx5-lock-switch -- "$1 fcitx_state=$(input_state)" 2>/dev/null || true
 }
 
 lock_started() {
@@ -24,7 +28,7 @@ lock_started() {
 
   if [[ $(input_state) == 2 ]]; then
     was_active=true
-    previous_input_method=$(fcitx5-remote -n 2>/dev/null)
+    previous_input_method=$(remote -n)
   fi
   log_state "lock-requested"
 }
@@ -38,9 +42,9 @@ lock_ready() {
     previous_input_method=
   fi
 
-  # Switch only after the lock surface has its own input context.
+  # This event is the switching point verified with the lock input context.
   if [[ $(input_state) == 2 ]]; then
-    fcitx5-remote -c >/dev/null 2>&1
+    remote -c >/dev/null
   fi
   log_state "lock-secure"
 }
@@ -48,9 +52,9 @@ lock_ready() {
 lock_ended() {
   [[ $last_locked == false ]] && return
   if [[ $was_active == true ]]; then
-    fcitx5-remote -o >/dev/null 2>&1
+    remote -o >/dev/null
     if [[ -n $previous_input_method ]]; then
-      fcitx5-remote -s "$previous_input_method" >/dev/null 2>&1
+      remote -s "$previous_input_method" >/dev/null
     fi
   fi
   was_active=false
@@ -60,29 +64,53 @@ lock_ended() {
 }
 
 check_current_lock() {
-  case $(omarchy-shell -q lock isLocked 2>/dev/null) in
-    true) lock_ready ;;
-    false) lock_ended ;;
+  local status phase
+  status=$(timeout 2s omarchy-shell -q lock status 2>/dev/null) || return
+  phase=$(jq -er '
+    if .secure == true then "secure"
+    elif .requested == true then "requested"
+    elif .locked == false then "unlocked"
+    else empty end
+  ' <<<"$status" 2>/dev/null) || return
+  case $phase in
+    secure) lock_ready ;;
+    requested) lock_started ;;
+    unlocked) lock_ended ;;
   esac
 }
 
 journal_pid=
+journal_fd=
 cleanup() {
   [[ -z $journal_pid ]] || kill "$journal_pid" 2>/dev/null || true
+  [[ -z $journal_pid ]] || wait "$journal_pid" 2>/dev/null || true
+  if [[ -n $journal_fd ]]; then
+    exec {journal_fd}<&-
+    journal_fd=
+  fi
 }
 trap cleanup EXIT
+trap 'exit 0' TERM INT
 
 while :; do
-  # Subscribe first, then read the current state. This closes the gap between
-  # checking the state and receiving the next journal event.
+  # Start the subscriber before reconciling state. journalctl has no readiness
+  # handshake, so this reduces but does not eliminate the startup event gap.
   coproc LOCK_LOG {
-    journalctl --user --follow --lines=0 --output=cat \
+    exec journalctl --user --follow --lines=0 --output=cat \
       SYSLOG_IDENTIFIER=omarchy-shell 2>/dev/null
   }
   journal_pid=$LOCK_LOG_PID
+  # Bash may unset LOCK_LOG when the process exits. Keep our own descriptor
+  # so EOF remains readable even if journalctl exits during the state query.
+  if ! exec {journal_fd}<&"${LOCK_LOG[0]}"; then
+    cleanup
+    journal_pid=
+    sleep 1
+    continue
+  fi
   check_current_lock
 
-  while IFS= read -r event <&"${LOCK_LOG[0]}"; do
+  while IFS= read -r event <&"$journal_fd"; do
     case $event in
       *"omarchy lock "*" lock-requested") lock_started ;;
       *"omarchy lock "*" secure=true") lock_ready ;;
@@ -91,7 +119,6 @@ while :; do
   done
 
   cleanup
-  wait "$journal_pid" 2>/dev/null || true
   journal_pid=
   sleep 1
 done

@@ -4,8 +4,7 @@ import Quickshell.Io
 Item {
   id: root
 
-  // The lock service is private to Omarchy. Its public IPC reports the lock
-  // request before the session-lock surface appears.
+  // Follow journal events because the built-in lock service is private.
   Process {
     id: monitor
     command: ["bash", decodeURIComponent(Qt.resolvedUrl("monitor.sh").toString().replace(/^file:\/\//, ""))]

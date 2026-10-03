@@ -6,41 +6,46 @@ test_dir=$(mktemp -d)
 monitor_pid=
 cleanup() {
   [[ -z $monitor_pid ]] || kill "$monitor_pid" 2>/dev/null || true
+  [[ -z $monitor_pid ]] || wait "$monitor_pid" 2>/dev/null || true
   exec 3>&- 2>/dev/null || true
   rm -rf "$test_dir"
 }
 trap cleanup EXIT
 
 mkdir -p "$test_dir/bin"
-export RIME_LOCK_TEST_DIR="$test_dir"
+export LOCK_SWITCH_TEST_DIR="$test_dir"
 export PATH="$test_dir/bin:$PATH"
 
 cat >"$test_dir/bin/omarchy-shell" <<'EOF'
 #!/usr/bin/env bash
-cat "$RIME_LOCK_TEST_DIR/locked"
-echo checked >>"$RIME_LOCK_TEST_DIR/checks"
+case $(cat "$LOCK_SWITCH_TEST_DIR/locked") in
+  true) echo '{"locked":true,"requested":true,"secure":true}' ;;
+  requested) echo '{"locked":true,"requested":true,"secure":false}' ;;
+  false) echo '{"locked":false,"requested":false,"secure":false}' ;;
+esac
+echo checked >>"$LOCK_SWITCH_TEST_DIR/checks"
 EOF
 
 cat >"$test_dir/bin/journalctl" <<'EOF'
 #!/usr/bin/env bash
-cat "$RIME_LOCK_TEST_DIR/events"
+exec cat "$LOCK_SWITCH_TEST_DIR/events"
 EOF
 
 cat >"$test_dir/bin/fcitx5-remote" <<'EOF'
 #!/usr/bin/env bash
-context=$(cat "$RIME_LOCK_TEST_DIR/context")
-state_file="$RIME_LOCK_TEST_DIR/state_$context"
+context=$(cat "$LOCK_SWITCH_TEST_DIR/context")
+state_file="$LOCK_SWITCH_TEST_DIR/state_$context"
 case "${1-}" in
-  -n) cat "$RIME_LOCK_TEST_DIR/method" ;;
-  -c) echo inactive >"$state_file"; echo "deactivate:$context" >>"$RIME_LOCK_TEST_DIR/actions" ;;
-  -o) echo active >"$state_file"; echo "activate:$context" >>"$RIME_LOCK_TEST_DIR/actions" ;;
-  -s) echo "$2" >"$RIME_LOCK_TEST_DIR/method"; echo "select:$2" >>"$RIME_LOCK_TEST_DIR/actions" ;;
+  -n) cat "$LOCK_SWITCH_TEST_DIR/method" ;;
+  -c) echo inactive >"$state_file"; echo "deactivate:$context" >>"$LOCK_SWITCH_TEST_DIR/actions" ;;
+  -o) echo active >"$state_file"; echo "activate:$context" >>"$LOCK_SWITCH_TEST_DIR/actions" ;;
+  -s) echo "$2" >"$LOCK_SWITCH_TEST_DIR/method"; echo "select:$2" >>"$LOCK_SWITCH_TEST_DIR/actions" ;;
   *) case "$(cat "$state_file")" in active) echo 2 ;; inactive) echo 1 ;; esac ;;
 esac
 EOF
 cat >"$test_dir/bin/logger" <<'EOF'
 #!/usr/bin/env bash
-echo "$*" >>"$RIME_LOCK_TEST_DIR/log"
+echo "$*" >>"$LOCK_SWITCH_TEST_DIR/log"
 EOF
 chmod +x "$test_dir/bin/omarchy-shell" "$test_dir/bin/fcitx5-remote" "$test_dir/bin/journalctl" "$test_dir/bin/logger"
 mkfifo "$test_dir/events"
@@ -116,5 +121,59 @@ echo "omarchy lock 2026-10-02T00:00:03Z unlocked" >&3
 wait_for_log unlocked
 [[ $(cat "$test_dir/state_foot") == inactive ]]
 ! rg -q '^activate:' "$test_dir/actions"
+
+# Stopping the service must reap its journal subscriber.
+journal_pid=$(cat "/proc/$monitor_pid/task/$monitor_pid/children")
+[[ -n $journal_pid ]]
+kill "$monitor_pid"
+wait "$monitor_pid"
+monitor_pid=
+for child_pid in $journal_pid; do
+  ! kill -0 "$child_pid" 2>/dev/null
+done
+
+# Starting mid-lock deactivates input without inventing pre-lock state.
+echo true >"$test_dir/locked"
+echo lock >"$test_dir/context"
+echo active >"$test_dir/state_lock"
+: >"$test_dir/actions"
+: >"$test_dir/log"
+bash "$repo_dir/monitor.sh" &
+monitor_pid=$!
+wait_for_log lock-secure
+wait_for_state lock inactive
+# A late/duplicate request must not overwrite the unknown pre-lock state.
+echo "omarchy lock 2026-10-02T00:00:04Z lock-requested" >&3
+echo "omarchy lock 2026-10-02T00:00:04Z secure=true" >&3
+echo foot >"$test_dir/context"
+echo false >"$test_dir/locked"
+echo "omarchy lock 2026-10-02T00:00:05Z unlocked" >&3
+wait_for_log unlocked
+! rg -q '^activate:|^select:' "$test_dir/actions"
+
+# A startup status with requested=true and secure=false must not deactivate.
+kill "$monitor_pid"
+wait "$monitor_pid"
+monitor_pid=
+echo requested >"$test_dir/locked"
+echo foot >"$test_dir/context"
+echo active >"$test_dir/state_foot"
+echo active >"$test_dir/state_lock"
+: >"$test_dir/actions"
+: >"$test_dir/log"
+bash "$repo_dir/monitor.sh" &
+monitor_pid=$!
+wait_for_log lock-requested
+[[ ! -s $test_dir/actions ]]
+echo lock >"$test_dir/context"
+echo "omarchy lock 2026-10-02T00:00:06Z secure=true" >&3
+wait_for_log lock-secure
+wait_for_state lock inactive
+echo foot >"$test_dir/context"
+echo false >"$test_dir/locked"
+echo "omarchy lock 2026-10-02T00:00:07Z unlocked" >&3
+wait_for_log unlocked
+rg -q '^activate:foot$' "$test_dir/actions"
+rg -q '^select:rime$' "$test_dir/actions"
 
 echo "monitor: passed"

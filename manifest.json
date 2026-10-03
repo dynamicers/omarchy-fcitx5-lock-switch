@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "id": "rime.lock-ascii",
-  "name": "Rime Lock ASCII",
-  "version": "1.0.0",
+  "id": "omarchy-fcitx5-lock-switch",
+  "name": "omarchy-fcitx5-lock-switch",
+  "version": "1.1.0",
   "author": "Omarchy community",
-  "description": "Use the keyboard while Omarchy is locked, then restore the previous input method.",
+  "description": "Deactivate Fcitx5 during screen lock. Restore the input method after unlock.",
   "kinds": ["service"],
   "keepLoaded": true,
   "entryPoints": {
